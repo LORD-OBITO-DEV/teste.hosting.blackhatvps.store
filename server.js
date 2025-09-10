@@ -6,146 +6,136 @@ import nodemailer from "nodemailer";
 import Transaction from "./models/Transaction.js";
 import path from "path";
 import { fileURLToPath } from "url";
-import OVH from "ovh"; // npm install ovh
+import OVH from "ovh";
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// MongoDB
-mongoose.connect(config.MONGO_URI)
-  .then(()=>console.log("✅ Connecté à MongoDB"))
-  .catch(err=>console.error("❌ Erreur MongoDB:", err));
+// --- MongoDB ---
+mongoose
+  .connect(config.MONGO_URI)
+  .then(() => console.log("✅ Connecté à MongoDB"))
+  .catch((err) => console.error("❌ Erreur MongoDB:", err));
 
-// PayPal
+// --- PayPal ---
 paypal.configure({
   mode: config.PAYPAL_MODE,
   client_id: config.PAYPAL_CLIENT_ID,
   client_secret: config.PAYPAL_CLIENT_SECRET,
 });
 
-// OVH Client
-const ovhClient = new OVH({
+// --- OVH ---
+const ovh = new OVH({
   appKey: config.OVH_APP_KEY,
   appSecret: config.OVH_APP_SECRET,
   consumerKey: config.OVH_CONSUMER_KEY,
-  endpoint: "ovh-eu"
 });
 
-// Statics
+// --- Public folder ---
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 app.use(express.static(path.join(__dirname, "public")));
 
-// Calcul prix final
-function calcPrice(ovhPrice) {
-  return ovhPrice * 1.15 * 1.05; // +15% bénéfice +5% frais
-}
-
-// API : liste des VPS OVH
-app.get("/api/vps-list", async (req,res)=>{
+// --- Paiement ---
+app.post("/pay", async (req, res) => {
   try {
-    const vpsListRaw = await ovhClient.requestPromised("GET", "/vps"); // récupère VPS existants
-    // Ici, on mappe en mock pour l'exemple
-    const vpsList = vpsListRaw.map(vps=>{
-      return {
-        id: vps.serviceName,
-        name: vps.planCode,
-        price: calcPrice(10) // mettre le vrai prix OVH
-      };
-    });
-    res.json(vpsList);
-  } catch(e) {
-    console.error(e);
-    res.status(500).send("Erreur récupération VPS");
-  }
-});
+    const { email, amount, service, os } = req.body;
 
-// Endpoint paiement
-app.post("/pay", async (req,res)=>{
-  try {
-    const { email, amount, vpsId, os } = req.body;
-    const transaction = await Transaction.create({ email, amount, vpsId, os });
+    const transaction = await Transaction.create({ email, amount, service, os });
 
     const create_payment_json = {
       intent: "sale",
-      payer: { payment_method:"paypal" },
+      payer: { payment_method: "paypal" },
       redirect_urls: {
         return_url: `${config.SITE_URL}/success`,
         cancel_url: `${config.SITE_URL}/cancel`,
       },
-      transactions: [{
-        item_list:{ items:[{ name:"VPS Service", sku:vpsId, price:amount, currency:"USD", quantity:1 }]},
-        amount:{ currency:"USD", total:amount },
-        description:`VPS ${vpsId} (${os}) via BlackHatVPS`
-      }]
+      transactions: [
+        {
+          item_list: {
+            items: [
+              { name: service, sku: "001", price: amount, currency: "USD", quantity: 1 },
+            ],
+          },
+          amount: { currency: "USD", total: amount },
+          description: `Achat ${service} via BlackHatVPS`,
+        },
+      ],
     };
 
-    paypal.payment.create(create_payment_json, (err,payment)=>{
-      if(err) return res.status(500).json({ error: err });
+    paypal.payment.create(create_payment_json, (error, payment) => {
+      if (error) return res.status(500).json({ error });
+
       transaction.paymentId = payment.id;
       transaction.save();
-      const approvalUrl = payment.links.find(l=>l.rel==="approval_url").href;
+
+      const approvalUrl = payment.links.find((link) => link.rel === "approval_url").href;
       res.json({ approvalUrl });
     });
-
-  } catch(e) {
-    res.status(500).json({ error:e.message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Endpoint succès
-app.get("/success", async (req,res)=>{
+// --- Success ---
+app.get("/success", async (req, res) => {
   const { paymentId, PayerID } = req.query;
 
-  paypal.payment.execute(paymentId, { payer_id:PayerID }, async (err,payment)=>{
-    if(err) return res.status(500).send(err);
+  paypal.payment.execute(paymentId, { payer_id: PayerID }, async (error, payment) => {
+    if (error) return res.status(500).send(error);
 
     const transaction = await Transaction.findOneAndUpdate(
       { paymentId },
-      { status:"completed", payerId:PayerID },
-      { new:true }
+      { status: "completed", payerId: PayerID },
+      { new: true }
     );
 
-    // ✅ Création VPS OVH automatique
-    try {
-      const createVPS = await ovhClient.requestPromised("POST", "/vps/{serviceName}/create", {
-        serviceName: transaction.vpsId,
-        model: transaction.vpsId,
-        os: transaction.os,
-      });
-      console.log("VPS créé:", createVPS);
-    } catch(e) {
-      console.error("Erreur création VPS:", e);
+    // --- Création VPS OVH ---
+    if (transaction) {
+      const plan = transaction.service; // ex: VPS 1GB
+      const osTemplate = transaction.os; // ex: Debian 12
+      const price = transaction.amount;
+
+      // Exemple OVH: créer VPS (API OVH)
+      // https://api.ovh.com/console/#/vps#POST
+      // Ajuste selon ton type d'offre OVH
+      // ovh.request('POST', '/vps/{serviceName}/create', {...})
     }
 
-    // ✅ Envoi mail
-    if(transaction?.email){
+    // --- Email ---
+    if (transaction.email) {
       const transporter = nodemailer.createTransport({
-        service:"gmail",
-        auth:{ user:config.MAIL_USER, pass:config.MAIL_PASS }
+        service: "gmail",
+        auth: { user: config.MAIL_USER, pass: config.MAIL_PASS },
       });
+
       await transporter.sendMail({
-        from:`"BlackHatVPS" <${config.MAIL_USER}>`,
+        from: `"BlackHatVPS" <${config.MAIL_USER}>`,
         to: transaction.email,
-        subject:"✅ Confirmation commande VPS",
-        html:`
+        subject: "✅ Confirmation de votre commande",
+        html: `
           <h2>Merci pour votre achat !</h2>
-          <p>VPS: ${transaction.vpsId} (${transaction.os})</p>
-          <p>Montant payé: ${transaction.amount} USD</p>
-          <p>Nous vous contacterons via WhatsApp pour vos identifiants.</p>
-        `
+          <p>Votre paiement de <b>${transaction.amount} USD</b> a été confirmé.</p>
+          <p>VPS: ${transaction.service} (${transaction.os})</p>
+          <p>Notre équipe vous contactera si nécessaire. Contact WhatsApp: <a href="https://wa.me/22507XXXXXXX">Cliquez ici</a></p>
+        `,
       });
     }
 
-    res.send("✅ Paiement validé, VPS créé et mail envoyé !");
+    res.send("✅ Paiement réussi, VPS créé et email envoyé !");
   });
 });
 
-app.get("/cancel", (req,res)=>res.send("❌ Paiement annulé."));
+// --- Cancel ---
+app.get("/cancel", (req, res) => {
+  res.send("❌ Paiement annulé.");
+});
 
-// Route fallback
-app.get("*",(req,res)=>res.sendFile(path.join(__dirname,"public","index.html")));
+// --- Fallback route ---
+app.get("*", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
 
-// Start
-app.listen(3000,()=>console.log("🚀 Serveur lancé sur http://localhost:3000"));
+// --- Start server ---
+app.listen(3000, () => console.log("🚀 Serveur lancé sur http://localhost:3000"));
