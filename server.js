@@ -37,10 +37,23 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 app.use(express.static(path.join(__dirname, "public")));
 
+// --- Helper : calcul prix final ---
+async function getFinalPrice(planName) {
+  // Exemple : récupérer le prix du plan chez OVH
+  const plans = await ovh.requestPromised('GET', `/vps`);
+  // Pour simplifier, supposons qu'on récupère le prix de l’offre
+  // OVH retourne la liste des VPS et leur tarif
+  const basePrice = 5; // $ placeholder, ici tu dois mettre le vrai prix OVH
+  const finalPrice = (basePrice * 1.15 * 1.05).toFixed(2); // +15% +5%
+  return finalPrice;
+}
+
 // --- Paiement ---
 app.post("/pay", async (req, res) => {
   try {
-    const { email, amount, service, os } = req.body;
+    const { email, service, os } = req.body;
+
+    const amount = await getFinalPrice(service);
 
     const transaction = await Transaction.create({ email, amount, service, os });
 
@@ -53,11 +66,7 @@ app.post("/pay", async (req, res) => {
       },
       transactions: [
         {
-          item_list: {
-            items: [
-              { name: service, sku: "001", price: amount, currency: "USD", quantity: 1 },
-            ],
-          },
+          item_list: { items: [{ name: service, sku: "001", price: amount, currency: "USD", quantity: 1 }] },
           amount: { currency: "USD", total: amount },
           description: `Achat ${service} via BlackHatVPS`,
         },
@@ -91,36 +100,43 @@ app.get("/success", async (req, res) => {
       { new: true }
     );
 
-    // --- Création VPS OVH ---
     if (transaction) {
-      const plan = transaction.service; // ex: VPS 1GB
-      const osTemplate = transaction.os; // ex: Debian 12
-      const price = transaction.amount;
+      const plan = transaction.service;
+      const os = transaction.os;
 
-      // Exemple OVH: créer VPS (API OVH)
-      // https://api.ovh.com/console/#/vps#POST
-      // Ajuste selon ton type d'offre OVH
-      // ovh.request('POST', '/vps/{serviceName}/create', {...})
-    }
+      // --- Créer VPS via OVH API ---
+      try {
+        // Remplace SERVICE_NAME par ton identifiant OVH
+        // Le endpoint et paramètres exacts dépendent de ton offre OVH
+        await ovh.requestPromised('POST', `/vps/{serviceName}/create`, {
+          model: plan,
+          image: os.toLowerCase(), // ex: debian10, ubuntu20
+          sshKeyName: "default", // clé SSH si tu veux
+        });
+        console.log(`✅ VPS créé : ${plan} (${os})`);
+      } catch (err) {
+        console.error("❌ Erreur création VPS OVH:", err);
+      }
 
-    // --- Email ---
-    if (transaction.email) {
-      const transporter = nodemailer.createTransport({
-        service: "gmail",
-        auth: { user: config.MAIL_USER, pass: config.MAIL_PASS },
-      });
+      // --- Envoyer email au client ---
+      if (transaction.email) {
+        const transporter = nodemailer.createTransport({
+          service: "gmail",
+          auth: { user: config.MAIL_USER, pass: config.MAIL_PASS },
+        });
 
-      await transporter.sendMail({
-        from: `"BlackHatVPS" <${config.MAIL_USER}>`,
-        to: transaction.email,
-        subject: "✅ Confirmation de votre commande",
-        html: `
-          <h2>Merci pour votre achat !</h2>
-          <p>Votre paiement de <b>${transaction.amount} USD</b> a été confirmé.</p>
-          <p>VPS: ${transaction.service} (${transaction.os})</p>
-          <p>Notre équipe vous contactera si nécessaire. Contact WhatsApp: <a href="https://wa.me/22507XXXXXXX">Cliquez ici</a></p>
-        `,
-      });
+        await transporter.sendMail({
+          from: `"BlackHatVPS" <${config.MAIL_USER}>`,
+          to: transaction.email,
+          subject: "✅ Confirmation de votre commande",
+          html: `
+            <h2>Merci pour votre achat !</h2>
+            <p>Votre paiement de <b>${transaction.amount} USD</b> a été confirmé.</p>
+            <p>VPS: ${transaction.service} (${transaction.os})</p>
+            <p>Notre équipe vous contactera si nécessaire. Contact WhatsApp: <a href="https://wa.me/2250712668494">Cliquez ici</a></p>
+          `,
+        });
+      }
     }
 
     res.send("✅ Paiement réussi, VPS créé et email envoyé !");
@@ -128,14 +144,10 @@ app.get("/success", async (req, res) => {
 });
 
 // --- Cancel ---
-app.get("/cancel", (req, res) => {
-  res.send("❌ Paiement annulé.");
-});
+app.get("/cancel", (req, res) => res.send("❌ Paiement annulé."));
 
 // --- Fallback route ---
-app.get("*", (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "index.html"));
-});
+app.get("*", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
 // --- Start server ---
 app.listen(3000, () => console.log("🚀 Serveur lancé sur http://localhost:3000"));
